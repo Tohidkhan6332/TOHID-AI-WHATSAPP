@@ -1,8 +1,8 @@
 {
   "name": "tohid-ai-whatsapp",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "TOHID-AI WhatsApp AI chatbot backend",
+  "description": "TOHID-AI WhatsApp AI chatbot with QR/pairing-code sessions",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
@@ -10,14 +10,19 @@
     "build": "tsc"
   },
   "dependencies": {
+    "@hapi/boom": "10.0.1",
     "@supabase/supabase-js": "2.57.0",
+    "@whiskeysockets/baileys": "7.0.0-rc.6",
     "dotenv": "17.2.1",
     "express": "5.1.0",
-    "openai": "5.19.1"
+    "openai": "5.19.1",
+    "pino": "9.9.0",
+    "qrcode": "1.5.4"
   },
   "devDependencies": {
     "@types/express": "5.0.3",
     "@types/node": "24.3.0",
+    "@types/qrcode": "1.5.5",
     "tsx": "4.20.5",
     "typescript": "5.9.2"
   }
