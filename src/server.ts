@@ -12,6 +12,7 @@ import makeWASocket, {
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import QRCode from 'qrcode';
+import crypto from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 
 const app = express();
@@ -23,55 +24,87 @@ const logger = pino({ level: process.env.LOG_LEVEL || 'silent' });
 const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
   : null;
-const pairingAdminToken = process.env.PAIRING_ADMIN_TOKEN || '';
 
 const sessions = new Map<string, ReturnType<typeof makeWASocket>>();
 const pendingQr = new Map<string, string>();
 const pendingPairing = new Map<string, string>();
 const connecting = new Set<string>();
+const sessionTokens = new Map<string, string>();
+const requestTimes = new Map<string, number>();
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'TOHID-AI-WHATSAPP', sessions: sessions.size });
 });
 
 app.get('/', (_req, res) => {
-  res.type('html').send(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>TOHID-AI WhatsApp</title><style>body{font-family:system-ui;max-width:720px;margin:40px auto;padding:20px}input,button{padding:12px;margin:5px 0;width:100%;box-sizing:border-box}button{cursor:pointer}.card{border:1px solid #ddd;border-radius:12px;padding:18px;margin-top:16px}img{max-width:280px;display:block;margin:15px auto}</style></head><body><h1>TOHID-AI WhatsApp</h1><p>Connect your WhatsApp using a pairing code.</p><div class="card"><input id="token" placeholder="Pairing admin token" type="password"><input id="phone" placeholder="Phone number with country code, e.g. 919876543210"><button onclick="pair()">Generate pairing code</button><pre id="out"></pre></div><script>async function pair(){const out=document.getElementById('out');out.textContent='Generating...';const r=await fetch('/api/pair',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({phone:document.getElementById('phone').value,token:document.getElementById('token').value})});const j=await r.json();out.textContent=JSON.stringify(j,null,2)}</script></body></html>`);
+  res.type('html').send(`<!doctype html>
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>TOHID-AI WhatsApp</title>
+<style>
+body{margin:0;background:#0b0f14;color:#f5f7fa;font-family:system-ui,-apple-system,sans-serif}.wrap{max-width:520px;margin:0 auto;padding:28px 18px}.card{background:#121923;border:1px solid #263241;border-radius:20px;padding:22px;box-shadow:0 12px 40px #0005}.logo{font-size:34px;font-weight:800}.muted{color:#9aa7b5}.tabs{display:flex;gap:8px;margin:20px 0}.tab,button{border:0;border-radius:12px;padding:13px 16px;font-weight:700;cursor:pointer}.tab{flex:1;background:#1b2633;color:#cdd6df}.tab.active{background:#fff;color:#111}.panel{display:none}.panel.active{display:block}input{width:100%;box-sizing:border-box;padding:14px;border-radius:12px;border:1px solid #344252;background:#0d141d;color:#fff;font-size:16px;margin:8px 0 12px}button.primary{width:100%;background:#fff;color:#111;font-size:16px}.code{font-size:30px;letter-spacing:5px;text-align:center;font-weight:800;margin:20px 0}.status{text-align:center;margin:14px 0}.qr{display:block;width:260px;height:260px;margin:18px auto;background:#fff;border-radius:12px}.steps{line-height:1.65}.error{color:#ff8d8d;white-space:pre-wrap}.ok{color:#72e6a1}.small{font-size:13px}
+</style></head>
+<body><div class="wrap"><div class="card"><div class="logo">🤖 TOHID-AI</div><p class="muted">Connect your WhatsApp and turn it into an AI assistant.</p>
+<div class="tabs"><button class="tab active" id="pairTab" onclick="show('pair')">Pairing Code</button><button class="tab" id="qrTab" onclick="show('qr')">QR Code</button></div>
+<div id="pair" class="panel active"><input id="phone" inputmode="numeric" placeholder="WhatsApp number, e.g. 919876543210"><button class="primary" onclick="connect(true)">Generate Pairing Code</button><div id="pairResult"></div></div>
+<div id="qr" class="panel"><button class="primary" onclick="connect(false)">Generate QR Code</button><div id="qrResult"></div></div>
+<p class="muted small">Only connect WhatsApp accounts you own or are authorized to use. This service uses an unofficial WhatsApp Web client.</p>
+</div></div>
+<script>
+let phone='', token='', timer=null;
+function show(id){document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));document.getElementById(id+'Tab').classList.add('active')}
+async function connect(pairing){
+ const input=document.getElementById('phone'); phone=(input?.value||'').replace(/\\D/g,'');
+ if(!/^\\d{8,15}$/.test(phone)){alert('Enter WhatsApp number with country code, digits only.');return}
+ const out=document.getElementById(pairing?'pairResult':'qrResult');out.innerHTML='<div class="status">Connecting…</div>';
+ const r=await fetch('/api/connect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({phone,mode:pairing?'pairing':'qr'})});
+ const j=await r.json(); if(!r.ok){out.innerHTML='<div class="error">'+(j.error||'Connection failed')+'</div>';return}
+ token=j.token||''; render(j,out); clearInterval(timer); timer=setInterval(poll,1500);
+}
+function render(j,out){let html='<div class="status">'+(j.connected?'<span class="ok">✓ WhatsApp connected</span>':'Waiting for WhatsApp…')+'</div>';
+ if(j.pairingCode)html+='<div class="code">'+j.pairingCode+'</div><div class="steps">On your phone: <b>WhatsApp → Linked Devices → Link a device → Link with phone number instead</b>, then enter this code.</div>';
+ if(j.qrDataUrl)html+='<img class="qr" src="'+j.qrDataUrl+'" alt="WhatsApp QR code"><div class="steps">On your phone: <b>WhatsApp → Linked Devices → Link a device</b>, then scan this QR.</div>';
+ out.innerHTML=html;
+}
+async function poll(){if(!phone)return;const r=await fetch('/api/session/'+encodeURIComponent(phone));const j=await r.json();const out=document.getElementById(document.getElementById('pair').classList.contains('active')?'pairResult':'qrResult');render(j,out);if(j.connected){clearInterval(timer)}}
+</script></body></html>`);
 });
 
-app.post('/api/pair', async (req, res) => {
-  if (!pairingAdminToken || req.body?.token !== pairingAdminToken) {
-    return res.status(401).json({ error: 'Invalid pairing token' });
-  }
+app.post('/api/connect', async (req, res) => {
   const phone = normalizePhone(String(req.body?.phone || ''));
-  if (!/^\d{8,15}$/.test(phone)) {
-    return res.status(400).json({ error: 'Enter phone number with country code, digits only, no + or spaces.' });
-  }
+  const mode = req.body?.mode === 'qr' ? 'qr' : 'pairing';
+  if (!/^\d{8,15}$/.test(phone)) return res.status(400).json({ error: 'Enter a valid WhatsApp number with country code.' });
+  const now = Date.now();
+  const previous = requestTimes.get(phone) || 0;
+  if (now - previous < 15000) return res.status(429).json({ error: 'Please wait a few seconds before requesting another connection.' });
+  requestTimes.set(phone, now);
   try {
-    return res.json(await startSession(phone, true));
+    const result = await startSession(phone, mode === 'pairing');
+    const token = sessionTokens.get(phone) || crypto.randomBytes(24).toString('hex');
+    sessionTokens.set(phone, token);
+    return res.json({ ...result, token });
   } catch (error) {
-    console.error('Pairing error:', error);
+    console.error('Connection error:', error);
     return res.status(500).json({ error: 'Could not create WhatsApp session.' });
   }
 });
 
 app.get('/api/session/:phone', async (req, res) => {
   const phone = normalizePhone(req.params.phone);
-  res.json({ phone, connected: Boolean(sessions.get(phone)), pairingCode: pendingPairing.get(phone) || null, qrDataUrl: pendingQr.get(phone) || null });
+  res.json({ phone, connected: Boolean(sessions.get(phone)), pairingCode: pendingPairing.get(phone) || null, qrDataUrl: pendingQr.get(phone) || null, token: sessionTokens.get(phone) || null });
 });
 
 app.post('/api/session/:phone/logout', async (req, res) => {
-  if (!pairingAdminToken || req.body?.token !== pairingAdminToken) return res.status(401).json({ error: 'Invalid pairing token' });
   const phone = normalizePhone(req.params.phone);
+  if (req.body?.token !== sessionTokens.get(phone)) return res.status(401).json({ error: 'Invalid session token' });
   const socket = sessions.get(phone);
   if (socket) await socket.logout().catch(() => undefined);
-  sessions.delete(phone); pendingQr.delete(phone); pendingPairing.delete(phone);
+  sessions.delete(phone); pendingQr.delete(phone); pendingPairing.delete(phone); sessionTokens.delete(phone);
   await deleteAuthState(phone);
   res.json({ ok: true });
 });
 
 async function startSession(phone: string, requestPairing: boolean) {
   if (sessions.has(phone)) return { connected: true, phone };
-  if (connecting.has(phone)) return { connecting: true, phone, pairingCode: pendingPairing.get(phone) || null };
+  if (connecting.has(phone)) return { connecting: true, phone, pairingCode: pendingPairing.get(phone) || null, qrDataUrl: pendingQr.get(phone) || null };
   connecting.add(phone);
   try {
     const { state, saveCreds } = await useSupabaseAuthState(phone);
@@ -97,9 +130,9 @@ async function startSession(phone: string, requestPairing: boolean) {
     if (requestPairing && !state.creds.registered) {
       const code = await socket.requestPairingCode(phone);
       pendingPairing.set(phone, code);
-      return { phone, connected: false, pairingCode: code, instructions: 'WhatsApp → Linked Devices → Link a device → Link with phone number instead, then enter the code.' };
+      return { phone, connected: false, pairingCode: code, qrDataUrl: null, instructions: 'Link with phone number instead and enter the code.' };
     }
-    return { phone, connected: Boolean(state.creds.registered) };
+    return { phone, connected: Boolean(state.creds.registered), pairingCode: pendingPairing.get(phone) || null, qrDataUrl: pendingQr.get(phone) || null };
   } finally {
     if (!sessions.has(phone)) connecting.delete(phone);
   }
