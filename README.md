@@ -1,8 +1,16 @@
 # TOHID-AI WhatsApp
 
-TOHID-AI is a ChatGPT-style WhatsApp bot using OpenAI, Supabase and the unofficial Baileys WhatsApp Web client. It supports persistent WhatsApp sessions, pairing-code login and QR-code state.
+Public WhatsApp AI assistant using OpenAI, Supabase and the unofficial Baileys WhatsApp Web client.
 
-> Important: Baileys is an unofficial WhatsApp Web library and is not affiliated with WhatsApp. Use it only for accounts you control and comply with WhatsApp's Terms of Service. Avoid spam, bulk messaging and other abusive automation.
+## Features
+
+- Public pairing page
+- Pairing-code login
+- QR-code login
+- Persistent Baileys auth state in Supabase
+- Per-account and per-chat conversation memory
+- Automatic reconnect after transient disconnects
+- Heroku-compatible Node/TypeScript server
 
 ## Heroku Config Vars
 
@@ -11,7 +19,6 @@ OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-5-mini
 SUPABASE_URL=...
 SUPABASE_SERVICE_ROLE_KEY=...
-PAIRING_ADMIN_TOKEN=...
 LOG_LEVEL=silent
 ```
 
@@ -19,27 +26,21 @@ LOG_LEVEL=silent
 
 ## Supabase setup
 
-Run `supabase/schema.sql` in Supabase SQL Editor. The schema stores chat memory and the Baileys authentication credentials/Signal keys so a Heroku restart does not require re-pairing.
+Run `supabase/schema.sql` in the Supabase SQL Editor before the first pairing. The schema stores chat history and encrypted-at-rest-by-provider database records for Baileys authentication state. Never expose `SUPABASE_SERVICE_ROLE_KEY` to the browser.
 
-Never expose `SUPABASE_SERVICE_ROLE_KEY` to the browser.
+## Deploy
 
-## Deploy to Heroku
+1. Create a Heroku app and connect this GitHub repository.
+2. Add the Config Vars above in Heroku Settings → Config Vars.
+3. Deploy the `main` branch.
+4. Open `/health` and confirm `ok: true`.
+5. Open `/` for the public pairing page.
+6. Enter the WhatsApp number with country code, digits only.
+7. Choose Pairing Code or QR Code.
+8. Complete linking in WhatsApp → Linked Devices.
 
-1. Create a Heroku app.
-2. Connect this GitHub repository.
-3. Add the Config Vars above in Heroku Settings → Config Vars.
-4. Deploy the `main` branch.
-5. Open `https://YOUR-APP.herokuapp.com/health`. It should return `ok: true`.
-6. Open `https://YOUR-APP.herokuapp.com/`.
-7. Enter your `PAIRING_ADMIN_TOKEN` and a WhatsApp number with country code, digits only, for example `919876543210`.
-8. Tap **Generate pairing code**.
-9. On that phone: WhatsApp → Linked Devices → Link a device → Link with phone number instead → enter the generated code.
-10. Once connected, messages received by that WhatsApp account can be answered by TOHID-AI.
+## Important limitations
 
-## QR
+This project uses Baileys, an unofficial WhatsApp Web client. It is not affiliated with WhatsApp. Use only accounts you own or are authorized to operate. Do not use the service for spam, bulk unsolicited messaging, scraping, or abuse. WhatsApp may restrict or terminate accounts using unauthorized automation.
 
-The server also captures WhatsApp QR data internally at `/api/session/:phone`. The current web page uses pairing code because it is easier to use on a remote Heroku dyno. A frontend can render the returned `qrDataUrl` if QR login is preferred.
-
-## Security
-
-Do not commit `.env`, OpenAI keys, Supabase service-role keys or WhatsApp authentication data. `PAIRING_ADMIN_TOKEN` is required before a new account can be paired. Use a long random value.
+For a public service, add stronger production controls before opening it to the internet at scale: CAPTCHA/Turnstile, per-IP and per-number rate limits, session quotas, abuse monitoring, encrypted application-level session storage, and a persistent worker architecture. A single Heroku web dyno is not a high-availability multi-session platform.
