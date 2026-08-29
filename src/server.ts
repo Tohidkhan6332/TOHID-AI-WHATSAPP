@@ -26,47 +26,74 @@ app.get('/webhook', (req, res) => {
   if (mode === 'subscribe' && token === verifyToken) {
     return res.status(200).send(challenge);
   }
-
   return res.sendStatus(403);
 });
 
 app.post('/webhook', async (req, res) => {
-  // Acknowledge Meta quickly; processing can happen asynchronously later.
   res.sendStatus(200);
 
   try {
     const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!message || message.type !== 'text') return;
 
-    const from = message.from as string;
-    const text = message.text?.body as string;
+    const from = String(message.from || '');
+    const text = String(message.text?.body || '').trim();
     if (!from || !text) return;
+
+    const history = await getConversationHistory(from);
 
     const completion = await openai.responses.create({
       model: process.env.OPENAI_MODEL || 'gpt-5-mini',
       input: [
         {
           role: 'system',
-          content: 'You are TOHID-AI, a helpful WhatsApp AI assistant. Answer clearly and concisely unless the user asks for detail.'
+          content: 'You are TOHID-AI, a helpful WhatsApp AI assistant. Answer clearly and naturally. Remember the conversation context provided to you. Use the user\'s language when practical.'
         },
+        ...history.map((item) => ({
+          role: item.role as 'user' | 'assistant',
+          content: item.content
+        })),
         { role: 'user', content: text }
       ]
     });
 
     const reply = completion.output_text?.trim() || 'Sorry, I could not generate a response.';
 
-    if (supabase) {
-      await supabase.from('messages').insert([
-        { whatsapp_number: from, role: 'user', content: text },
-        { whatsapp_number: from, role: 'assistant', content: reply }
-      ]);
-    }
-
+    await saveMessages(from, text, reply);
     await sendWhatsAppMessage(from, reply);
   } catch (error) {
     console.error('Webhook processing error:', error);
   }
 });
+
+async function getConversationHistory(whatsappNumber: string) {
+  if (!supabase) return [] as Array<{ role: string; content: string }>;
+
+  const { data, error } = await supabase
+    .from('messages')
+    .select('role, content, created_at')
+    .eq('whatsapp_number', whatsappNumber)
+    .order('created_at', { ascending: false })
+    .limit(20);
+
+  if (error) {
+    console.error('Supabase history error:', error);
+    return [] as Array<{ role: string; content: string }>;
+  }
+
+  return (data || []).reverse();
+}
+
+async function saveMessages(whatsappNumber: string, userText: string, assistantText: string) {
+  if (!supabase) return;
+
+  const { error } = await supabase.from('messages').insert([
+    { whatsapp_number: whatsappNumber, role: 'user', content: userText },
+    { whatsapp_number: whatsappNumber, role: 'assistant', content: assistantText }
+  ]);
+
+  if (error) console.error('Supabase save error:', error);
+}
 
 async function sendWhatsAppMessage(to: string, body: string) {
   const token = process.env.WHATSAPP_ACCESS_TOKEN;
