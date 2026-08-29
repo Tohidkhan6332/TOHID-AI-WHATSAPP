@@ -42,15 +42,12 @@ app.post('/api/pair', async (req, res) => {
   if (!pairingAdminToken || req.body?.token !== pairingAdminToken) {
     return res.status(401).json({ error: 'Invalid pairing token' });
   }
-
   const phone = normalizePhone(String(req.body?.phone || ''));
   if (!/^\d{8,15}$/.test(phone)) {
     return res.status(400).json({ error: 'Enter phone number with country code, digits only, no + or spaces.' });
   }
-
   try {
-    const result = await startSession(phone, true);
-    return res.json(result);
+    return res.json(await startSession(phone, true));
   } catch (error) {
     console.error('Pairing error:', error);
     return res.status(500).json({ error: 'Could not create WhatsApp session.' });
@@ -59,13 +56,7 @@ app.post('/api/pair', async (req, res) => {
 
 app.get('/api/session/:phone', async (req, res) => {
   const phone = normalizePhone(req.params.phone);
-  const socket = sessions.get(phone);
-  res.json({
-    phone,
-    connected: Boolean(socket),
-    pairingCode: pendingPairing.get(phone) || null,
-    qrDataUrl: pendingQr.get(phone) || null,
-  });
+  res.json({ phone, connected: Boolean(sessions.get(phone)), pairingCode: pendingPairing.get(phone) || null, qrDataUrl: pendingQr.get(phone) || null });
 });
 
 app.post('/api/session/:phone/logout', async (req, res) => {
@@ -73,9 +64,7 @@ app.post('/api/session/:phone/logout', async (req, res) => {
   const phone = normalizePhone(req.params.phone);
   const socket = sessions.get(phone);
   if (socket) await socket.logout().catch(() => undefined);
-  sessions.delete(phone);
-  pendingQr.delete(phone);
-  pendingPairing.delete(phone);
+  sessions.delete(phone); pendingQr.delete(phone); pendingPairing.delete(phone);
   await deleteAuthState(phone);
   res.json({ ok: true });
 });
@@ -83,61 +72,33 @@ app.post('/api/session/:phone/logout', async (req, res) => {
 async function startSession(phone: string, requestPairing: boolean) {
   if (sessions.has(phone)) return { connected: true, phone };
   if (connecting.has(phone)) return { connecting: true, phone, pairingCode: pendingPairing.get(phone) || null };
-
   connecting.add(phone);
   try {
     const { state, saveCreds } = await useSupabaseAuthState(phone);
-    const socket = makeWASocket({
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, logger),
-      },
-      logger,
-      browser: Browsers.ubuntu('TOHID-AI'),
-      markOnlineOnConnect: false,
-      generateHighQualityLinkPreview: false,
-    });
-
+    const socket = makeWASocket({ auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) }, logger, browser: Browsers.ubuntu('TOHID-AI'), markOnlineOnConnect: false, generateHighQualityLinkPreview: false });
     sessions.set(phone, socket);
     socket.ev.on('creds.update', saveCreds);
-
     socket.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-      if (qr) {
-        pendingQr.set(phone, await QRCode.toDataURL(qr));
-      }
-      if (connection === 'open') {
-        pendingQr.delete(phone);
-        pendingPairing.delete(phone);
-        connecting.delete(phone);
-        console.log(`WhatsApp connected: ${phone}`);
-      }
+      if (qr) pendingQr.set(phone, await QRCode.toDataURL(qr));
+      if (connection === 'open') { pendingQr.delete(phone); pendingPairing.delete(phone); connecting.delete(phone); console.log(`WhatsApp connected: ${phone}`); }
       if (connection === 'close') {
-        sessions.delete(phone);
-        pendingQr.delete(phone);
-        pendingPairing.delete(phone);
-        connecting.delete(phone);
+        sessions.delete(phone); pendingQr.delete(phone); pendingPairing.delete(phone); connecting.delete(phone);
         const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-        if (statusCode !== DisconnectReason.loggedOut) {
-          setTimeout(() => startSession(phone, false).catch(console.error), 3000);
-        }
+        if (statusCode !== DisconnectReason.loggedOut) setTimeout(() => startSession(phone, false).catch(console.error), 3000);
       }
     });
-
     socket.ev.on('messages.upsert', async ({ messages }) => {
       for (const msg of messages) {
         if (msg.key.fromMe || !msg.message || !msg.key.remoteJid) continue;
         const text = extractText(msg.message);
-        if (!text) continue;
-        await handleIncomingMessage(phone, socket, msg.key.remoteJid, text);
+        if (text) await handleIncomingMessage(phone, socket, msg.key.remoteJid, text);
       }
     });
-
     if (requestPairing && !state.creds.registered) {
       const code = await socket.requestPairingCode(phone);
       pendingPairing.set(phone, code);
       return { phone, connected: false, pairingCode: code, instructions: 'WhatsApp → Linked Devices → Link a device → Link with phone number instead, then enter the code.' };
     }
-
     return { phone, connected: Boolean(state.creds.registered) };
   } finally {
     if (!sessions.has(phone)) connecting.delete(phone);
@@ -158,14 +119,10 @@ async function handleIncomingMessage(sessionPhone: string, socket: ReturnType<ty
     const reply = completion.output_text?.trim() || 'Sorry, I could not generate a response.';
     await saveMessages(sessionPhone, remoteJid, text, reply);
     await socket.sendMessage(remoteJid, { text: reply });
-  } catch (error) {
-    console.error(`Message error for ${sessionPhone}:`, error);
-  }
+  } catch (error) { console.error(`Message error for ${sessionPhone}:`, error); }
 }
 
-function extractText(message: any): string {
-  return String(message.conversation || message.extendedTextMessage?.text || message.imageMessage?.caption || message.videoMessage?.caption || '').trim();
-}
+function extractText(message: any): string { return String(message.conversation || message.extendedTextMessage?.text || message.imageMessage?.caption || message.videoMessage?.caption || '').trim(); }
 
 async function getConversationHistory(sessionPhone: string, chatId: string) {
   if (!supabase) return [] as Array<{ role: string; content: string }>;
@@ -177,8 +134,8 @@ async function getConversationHistory(sessionPhone: string, chatId: string) {
 async function saveMessages(sessionPhone: string, chatId: string, userText: string, assistantText: string) {
   if (!supabase) return;
   const { error } = await supabase.from('messages').insert([
-    { session_phone: sessionPhone, chat_id: chatId, role: 'user', content: userText },
-    { session_phone: sessionPhone, chat_id: chatId, role: 'assistant', content: assistantText },
+    { whatsapp_number: sessionPhone, session_phone: sessionPhone, chat_id: chatId, role: 'user', content: userText },
+    { whatsapp_number: sessionPhone, session_phone: sessionPhone, chat_id: chatId, role: 'assistant', content: assistantText },
   ]);
   if (error) console.error('Supabase message save error:', error);
 }
@@ -187,7 +144,6 @@ async function useSupabaseAuthState(sessionId: string) {
   if (!supabase) throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required.');
   const { data: credRow } = await supabase.from('whatsapp_auth_creds').select('creds').eq('session_id', sessionId).maybeSingle();
   const creds: AuthenticationCreds = credRow?.creds ? JSON.parse(JSON.stringify(credRow.creds), BufferJSON.reviver) : initAuthCreds();
-
   const state = {
     creds,
     keys: {
@@ -200,20 +156,14 @@ async function useSupabaseAuthState(sessionId: string) {
       set: async (data: Record<string, Record<string, any>>) => {
         for (const [type, values] of Object.entries(data)) {
           for (const [id, value] of Object.entries(values)) {
-            if (value == null) {
-              await supabase.from('whatsapp_auth_keys').delete().eq('session_id', sessionId).eq('key_type', type).eq('key_id', id);
-            } else {
-              await supabase.from('whatsapp_auth_keys').upsert({ session_id: sessionId, key_type: type, key_id: id, value: JSON.parse(JSON.stringify(value, BufferJSON.replacer)) }, { onConflict: 'session_id,key_type,key_id' });
-            }
+            if (value == null) await supabase.from('whatsapp_auth_keys').delete().eq('session_id', sessionId).eq('key_type', type).eq('key_id', id);
+            else await supabase.from('whatsapp_auth_keys').upsert({ session_id: sessionId, key_type: type, key_id: id, value: JSON.parse(JSON.stringify(value, BufferJSON.replacer)) }, { onConflict: 'session_id,key_type,key_id' });
           }
         }
       },
     },
   };
-
-  const saveCreds = async () => {
-    await supabase.from('whatsapp_auth_creds').upsert({ session_id: sessionId, creds: JSON.parse(JSON.stringify(creds, BufferJSON.replacer)) }, { onConflict: 'session_id' });
-  };
+  const saveCreds = async () => { await supabase.from('whatsapp_auth_creds').upsert({ session_id: sessionId, creds: JSON.parse(JSON.stringify(creds, BufferJSON.replacer)), updated_at: new Date().toISOString() }, { onConflict: 'session_id' }); };
   return { state, saveCreds };
 }
 
@@ -224,5 +174,4 @@ async function deleteAuthState(sessionId: string) {
 }
 
 function normalizePhone(phone: string) { return phone.replace(/\D/g, ''); }
-
 app.listen(port, () => console.log(`TOHID-AI WhatsApp server listening on port ${port}`));
